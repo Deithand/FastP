@@ -10,6 +10,11 @@
     <RootNamespace>FastP</RootNamespace>
   </PropertyGroup>
 
+  <!-- Исключаем файлы тестов из компиляции основного проекта, если они случайно попадают туда -->
+  <ItemGroup>
+    <Compile Remove="FastP.Tests\**" />
+    <EmbeddedResource Remove="FastP.Tests\**" />
+    <None Remove="FastP.Tests\**" />
+  </ItemGroup>
 
 </Project>
-
