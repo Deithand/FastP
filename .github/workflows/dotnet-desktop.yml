@@ -14,7 +14,7 @@ jobs:
       matrix:
         configuration: [Debug, Release]
 
-    runs-on: windows-latest  # Для приложений с WinForms/WPF нужен Windows-раннер
+    runs-on: windows-latest
 
     env:
       Solution_Name: FastP.sln
@@ -26,7 +26,6 @@ jobs:
       with:
         fetch-depth: 0
 
-    # Установка .NET Core
     - name: Install .NET Core
       uses: actions/setup-dotnet@v4
       with:
@@ -41,15 +40,23 @@ jobs:
         }
       shell: powershell
 
-    # Восстановление зависимостей
     - name: Restore dependencies
       run: dotnet restore
       
-    # Сборка
     - name: Build
       run: dotnet build --configuration ${{ matrix.configuration }} --no-restore
 
-    # Запуск тестов
     - name: Test
       run: dotnet test --configuration ${{ matrix.configuration }} --no-build --verbosity normal
 
+    # Публикация артефактов (только для Release)
+    - name: Publish
+      if: matrix.configuration == 'Release'
+      run: dotnet publish FastP.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
+
+    - name: Upload Artifacts
+      if: matrix.configuration == 'Release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: FastP-Windows-x64
+        path: ./publish/FastP.exe
