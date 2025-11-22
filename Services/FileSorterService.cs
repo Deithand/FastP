@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -13,13 +14,18 @@ namespace FastP.Services
         private string _downloadsPath;
         private bool _isRunning;
         private bool _isPaused;
+        
+        // Стек для хранения истории перемещений: (Текущий путь, Исходный путь)
+        private readonly Stack<(string CurrentPath, string OriginalPath)> _undoStack = new();
 
         public event Action<string>? LogMessage;
         public event Action<int>? FilesProcessedChanged;
         public event Action<string, string>? FileMoved; // fileName, targetFolder
+        public event Action<bool>? UndoAvailabilityChanged;
 
         public bool IsRunning => _isRunning;
         public bool IsPaused => _isPaused;
+        public bool CanUndo => _undoStack.Count > 0;
         public int FilesProcessedToday { get; private set; }
         public int TotalFilesProcessed { get; private set; }
 
@@ -58,14 +64,11 @@ namespace FastP.Services
             if (!Directory.Exists(_downloadsPath))
             {
                 Log($"Папка для сортировки не найдена: {_downloadsPath}");
-                // Try to create if it's the default downloads, but usually it exists. 
-                // If user specified a custom path that doesn't exist, we log it.
                 return;
             }
 
             Log($"Сервис сортировки запущен. Отслеживание: {_downloadsPath}");
 
-            // Создаем FileSystemWatcher для отслеживания новых файлов
             _watcher = new FileSystemWatcher(_downloadsPath)
             {
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite,
@@ -76,8 +79,8 @@ namespace FastP.Services
             _watcher.Created += OnFileCreated;
             _watcher.Changed += OnFileChanged;
 
-            // Обрабатываем существующие файлы при старте
-            Task.Run(() => ProcessExistingFiles());
+            // Обрабатываем существующие файлы асинхронно
+            Task.Run(() => ProcessExistingFilesAsync());
         }
 
         public void Pause()
@@ -115,28 +118,70 @@ namespace FastP.Services
             Log("Сервис сортировки остановлен");
         }
 
-        private void OnFileCreated(object sender, FileSystemEventArgs e)
+        public void UndoLastAction()
         {
-            // Небольшая задержка, чтобы файл успел записаться
-            Task.Delay(1000).ContinueWith(_ => TrySortFile(e.FullPath));
+            if (_undoStack.Count == 0) return;
+
+            try
+            {
+                var (currentPath, originalPath) = _undoStack.Pop();
+                UndoAvailabilityChanged?.Invoke(_undoStack.Count > 0);
+
+                if (File.Exists(currentPath))
+                {
+                    // Проверяем, свободен ли исходный путь, если нет - переименовываем
+                    string targetPath = originalPath;
+                    if (File.Exists(targetPath))
+                    {
+                        targetPath = GenerateUniquePath(targetPath);
+                    }
+
+                    File.Move(currentPath, targetPath);
+                    Log($"Отменено: {Path.GetFileName(currentPath)} -> {Path.GetFileName(targetPath)}");
+                    
+                    // Уменьшаем статистику
+                    if (FilesProcessedToday > 0) FilesProcessedToday--;
+                    FilesProcessedChanged?.Invoke(FilesProcessedToday);
+                }
+                else
+                {
+                    Log($"Не удалось отменить: файл {Path.GetFileName(currentPath)} не найден");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Ошибка при отмене действия: {ex.Message}");
+            }
         }
 
-        private void OnFileChanged(object sender, FileSystemEventArgs e)
+        private async void OnFileCreated(object sender, FileSystemEventArgs e)
         {
-            // Обрабатываем изменения файла (например, когда браузер завершает загрузку)
-            Task.Delay(500).ContinueWith(_ => TrySortFile(e.FullPath));
+            await Task.Delay(1000); // Non-blocking delay
+            await TrySortFileAsync(e.FullPath);
         }
 
-        private void TrySortFile(string filePath)
+        private async void OnFileChanged(object sender, FileSystemEventArgs e)
+        {
+            await Task.Delay(500); // Non-blocking delay
+            await TrySortFileAsync(e.FullPath);
+        }
+
+        private async Task TrySortFileAsync(string filePath, int retryCount = 0)
         {
             if (!File.Exists(filePath) || _isPaused)
                 return;
 
-            // Проверяем, не занят ли файл
             if (IsFileLocked(filePath))
             {
-                // Повторяем попытку через некоторое время
-                Task.Delay(2000).ContinueWith(_ => TrySortFile(filePath));
+                if (retryCount < 3) // Max 3 retries
+                {
+                    await Task.Delay(2000);
+                    await TrySortFileAsync(filePath, retryCount + 1);
+                }
+                else
+                {
+                    Log($"Не удалось обработать файл (занят процессом): {Path.GetFileName(filePath)}");
+                }
                 return;
             }
 
@@ -149,20 +194,11 @@ namespace FastP.Services
             {
                 using (var stream = File.Open(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 {
-                    // Файл доступен
+                    return false;
                 }
-                return false;
             }
-            catch (IOException)
-            {
-                // Файл занят другим процессом
-                return true;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // Нет доступа к файлу
-                return true;
-            }
+            catch (IOException) { return true; }
+            catch (UnauthorizedAccessException) { return true; }
         }
 
         private void SortFile(string filePath)
@@ -171,57 +207,50 @@ namespace FastP.Services
             {
                 var fileInfo = new FileInfo(filePath);
                 
-                // Проверка размера файла
                 if (fileInfo.Length < _configManager.Settings.MinFileSize)
-                {
-                    // Log($"Файл {fileInfo.Name} пропущен (меньше минимального размера)");
                     return;
-                }
 
                 var fileName = fileInfo.Name;
                 var extension = fileInfo.Extension;
-                var targetFolder = _configManager.GetTargetFolder(extension);
+                var targetCategory = _configManager.GetTargetFolder(extension);
 
-                if (string.IsNullOrEmpty(targetFolder))
+                if (string.IsNullOrEmpty(targetCategory))
+                    return; // Нет правила
+
+                // Определяем путь назначения
+                var targetPath = Path.Combine(_downloadsPath, targetCategory);
+
+                // Feature: Sort by Date
+                if (_configManager.Settings.OrganizeByDate)
                 {
-                    Log($"Файл {fileName} не обработан (нет правила для расширения {extension})");
-                    return;
+                    var dateFolder = fileInfo.LastWriteTime.ToString("yyyy-MM-dd");
+                    targetPath = Path.Combine(targetPath, dateFolder);
                 }
-
-                var targetPath = Path.Combine(_downloadsPath, targetFolder);
                 
-                // Проверяем, не находится ли файл уже в целевой папке
+                // Игнорируем, если файл уже там
                 var fileDirectory = Path.GetDirectoryName(filePath);
                 if (string.Equals(fileDirectory, targetPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    return; // Файл уже в нужной папке
-                }
+                    return;
                 
-                // Создаем целевую папку, если её нет
                 if (!Directory.Exists(targetPath))
                 {
                     Directory.CreateDirectory(targetPath);
-                    Log($"Создана папка: {targetFolder}");
                 }
 
                 var destinationFile = Path.Combine(targetPath, fileName);
                 
-                // Если файл с таким именем уже существует, добавляем номер
+                // Обработка дубликатов имен
                 if (File.Exists(destinationFile))
                 {
-                    var nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
-                    var ext = Path.GetExtension(fileName);
-                    int counter = 1;
-                    
-                    do
-                    {
-                        destinationFile = Path.Combine(targetPath, $"{nameWithoutExt} ({counter}){ext}");
-                        counter++;
-                    } while (File.Exists(destinationFile));
+                    destinationFile = GenerateUniquePath(destinationFile);
                 }
 
-                // Перемещаем файл
+                // Перемещение
                 File.Move(filePath, destinationFile);
+                
+                // Добавляем в стек Undo
+                _undoStack.Push((destinationFile, filePath));
+                UndoAvailabilityChanged?.Invoke(true);
                 
                 // Обновляем статистику
                 FilesProcessedToday++;
@@ -229,50 +258,60 @@ namespace FastP.Services
                 FilesProcessedChanged?.Invoke(FilesProcessedToday);
                 SaveStatistics();
                 
-                // Отправляем событие для уведомлений
                 if (_configManager.Settings.EnableNotifications)
                 {
-                    FileMoved?.Invoke(fileName, targetFolder);
+                    FileMoved?.Invoke(fileName, targetCategory);
                 }
                 
-                Log($"Файл {fileName} перемещен в {targetFolder}");
+                Log($"Файл {fileName} перемещен в {targetCategory}");
             }
             catch (Exception ex)
             {
-                Log($"Ошибка при обработке файла {Path.GetFileName(filePath)}: {ex.Message}");
+                Log($"Ошибка при обработке {Path.GetFileName(filePath)}: {ex.Message}");
             }
         }
 
-        private void ProcessExistingFiles()
+        private string GenerateUniquePath(string fullPath)
+        {
+            if (!File.Exists(fullPath)) return fullPath;
+
+            var folder = Path.GetDirectoryName(fullPath);
+            var nameWithoutExt = Path.GetFileNameWithoutExtension(fullPath);
+            var ext = Path.GetExtension(fullPath);
+            int counter = 1;
+            string newPath;
+
+            do
+            {
+                newPath = Path.Combine(folder!, $"{nameWithoutExt} ({counter}){ext}");
+                counter++;
+            } while (File.Exists(newPath));
+
+            return newPath;
+        }
+
+        private async Task ProcessExistingFilesAsync()
         {
             try
             {
-                if (!Directory.Exists(_downloadsPath))
-                {
-                    Log($"Папка для сортировки не найдена: {_downloadsPath}");
-                    return;
-                }
+                if (!Directory.Exists(_downloadsPath)) return;
 
-                // Получаем только файлы из корня папки Загрузки (не из подпапок)
                 var files = Directory.GetFiles(_downloadsPath)
-                    .Where(f => 
-                    {
-                        var dir = Path.GetDirectoryName(f);
-                        return string.Equals(dir, _downloadsPath, StringComparison.OrdinalIgnoreCase);
-                    })
+                    .Where(f => string.Equals(Path.GetDirectoryName(f), _downloadsPath, StringComparison.OrdinalIgnoreCase))
                     .ToList();
 
-                Log($"Найдено {files.Count} файлов для обработки");
+                if (files.Count > 0)
+                    Log($"Найдено {files.Count} файлов для обработки");
 
                 foreach (var file in files)
                 {
-                    TrySortFile(file);
-                    Thread.Sleep(100); // Небольшая задержка между файлами
+                    await TrySortFileAsync(file);
+                    await Task.Delay(50); // Throttle slightly
                 }
             }
             catch (Exception ex)
             {
-                Log($"Ошибка при обработке существующих файлов: {ex.Message}");
+                Log($"Ошибка при сканировании папки: {ex.Message}");
             }
         }
 
@@ -296,20 +335,13 @@ namespace FastP.Services
                         TotalFilesProcessed = stats.TotalFilesProcessed;
                         var lastDate = DateTime.Parse(stats.LastProcessedDate);
                         if (lastDate.Date == DateTime.Today)
-                        {
                             FilesProcessedToday = stats.FilesProcessedToday;
-                        }
                         else
-                        {
                             FilesProcessedToday = 0;
-                        }
                     }
                 }
             }
-            catch
-            {
-                // Игнорируем ошибки загрузки статистики
-            }
+            catch { /* Ignore */ }
         }
 
         private void SaveStatistics()
@@ -325,10 +357,7 @@ namespace FastP.Services
                 var json = System.Text.Json.JsonSerializer.Serialize(stats, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText("statistics.json", json);
             }
-            catch
-            {
-                // Игнорируем ошибки сохранения статистики
-            }
+            catch { /* Ignore */ }
         }
 
         private class Statistics

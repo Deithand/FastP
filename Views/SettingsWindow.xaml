@@ -27,10 +27,14 @@
                     </Grid>
 
                     <CheckBox x:Name="NotificationsCheckBox" Content="Показывать уведомления Windows" Margin="0,0,0,10"/>
+                    <CheckBox x:Name="DateSortingCheckBox" Content="Сортировать по дате (Папка/YYYY-MM-DD)" Margin="0,0,0,10"/>
+                    <CheckBox x:Name="AutostartCheckBox" Content="Запускать при старте Windows" Margin="0,0,0,10"/>
 
                     <TextBlock Text="Минимальный размер файла (байт):" Margin="0,0,0,5"/>
                     <TextBox x:Name="MinSizeTextBox" Width="150" HorizontalAlignment="Left" PreviewTextInput="NumberValidationTextBox"/>
                     <TextBlock Text="0 = без ограничений" FontSize="10" Foreground="Gray" Margin="0,2,0,10"/>
+                    
+                    <Button Content="Проверить обновления" Click="CheckUpdates_Click" HorizontalAlignment="Left" Padding="10,5"/>
                 </StackPanel>
             </TabItem>
             <TabItem Header="Правила сортировки">

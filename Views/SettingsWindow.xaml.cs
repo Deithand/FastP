@@ -14,11 +14,13 @@ namespace FastP.Views
     {
         private readonly ConfigManager _configManager;
         private ObservableCollection<RuleItem> _rules;
+        private readonly AutoStartService _autoStartService;
 
         public SettingsWindow(ConfigManager configManager)
         {
             InitializeComponent();
             _configManager = configManager;
+            _autoStartService = new AutoStartService();
             LoadSettings();
         }
 
@@ -26,7 +28,11 @@ namespace FastP.Views
         {
             SourcePathTextBox.Text = _configManager.Settings.SourcePath ?? "";
             NotificationsCheckBox.IsChecked = _configManager.Settings.EnableNotifications;
+            DateSortingCheckBox.IsChecked = _configManager.Settings.OrganizeByDate;
             MinSizeTextBox.Text = _configManager.Settings.MinFileSize.ToString();
+            
+            // Load Autostart state from Registry, fallback to config
+            AutostartCheckBox.IsChecked = _autoStartService.IsAutoStartEnabled();
 
             _rules = new ObservableCollection<RuleItem>(
                 _configManager.Rules.Select(r => new RuleItem { Extension = r.Key, Folder = r.Value })
@@ -39,6 +45,8 @@ namespace FastP.Views
             // Save General Settings
             _configManager.Settings.SourcePath = SourcePathTextBox.Text;
             _configManager.Settings.EnableNotifications = NotificationsCheckBox.IsChecked ?? true;
+            _configManager.Settings.OrganizeByDate = DateSortingCheckBox.IsChecked ?? false;
+            _configManager.Settings.EnableAutostart = AutostartCheckBox.IsChecked ?? false;
             
             if (long.TryParse(MinSizeTextBox.Text, out long size))
             {
@@ -46,6 +54,9 @@ namespace FastP.Views
             }
 
             _configManager.SaveSettings();
+            
+            // Apply Autostart
+            _autoStartService.SetAutoStart(_configManager.Settings.EnableAutostart);
 
             // Save Rules
             _configManager.Rules.Clear();
@@ -60,6 +71,48 @@ namespace FastP.Views
 
             DialogResult = true;
             Close();
+        }
+
+        private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+        {
+            var btn = sender as System.Windows.Controls.Button;
+            if (btn != null) btn.IsEnabled = false;
+
+            try
+            {
+                var updateService = new UpdateService();
+                var update = await updateService.CheckForUpdatesAsync();
+
+                if (update != null)
+                {
+                    var result = System.Windows.MessageBox.Show(
+                        $"Доступна новая версия: {update.Version}\n\n{update.Description}\n\nОткрыть страницу загрузки?",
+                        "Обновление FastP",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Information);
+
+                    if (result == MessageBoxResult.Yes && !string.IsNullOrEmpty(update.DownloadUrl))
+                    {
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = update.DownloadUrl,
+                            UseShellExecute = true
+                        });
+                    }
+                }
+                else
+                {
+                    System.Windows.MessageBox.Show("У вас установлена последняя версия.", "FastP", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"Ошибка проверки обновлений: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                if (btn != null) btn.IsEnabled = true;
+            }
         }
 
         private void Cancel_Click(object sender, RoutedEventArgs e)
@@ -125,4 +178,3 @@ namespace FastP.Views
         public string Folder { get; set; } = "";
     }
 }
-

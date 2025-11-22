@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Forms;
 using FastP.Services;
 using FastP.ViewModels;
+using System.Linq;
 
 namespace FastP.Views
 {
@@ -28,6 +29,54 @@ namespace FastP.Views
 
             // Запуск сервиса сортировки
             _fileSorterService.Start();
+
+            // Проверка автозапуска и обновлений
+            Loaded += MainWindow_Loaded;
+        }
+
+        private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            // Проверка аргументов запуска
+            var args = Environment.GetCommandLineArgs();
+            if (args.Contains("--autostart"))
+            {
+                Hide();
+            }
+
+            // Тихая проверка обновлений
+            try
+            {
+                var updateService = new UpdateService();
+                var update = await updateService.CheckForUpdatesAsync();
+                if (update != null)
+                {
+                    // Показываем уведомление в трее, если есть обновление
+                    _notifyIcon?.ShowBalloonTip(5000, 
+                        "Доступно обновление FastP", 
+                        $"Версия {update.Version} доступна для скачивания. Нажмите, чтобы обновить.", 
+                        ToolTipIcon.Info);
+                    
+                    // Добавляем обработчик клика по баллуну для обновления
+                    if (_notifyIcon != null)
+                    {
+                        _notifyIcon.BalloonTipClicked += (s, args) =>
+                        {
+                            if (!string.IsNullOrEmpty(update.DownloadUrl))
+                            {
+                                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                                {
+                                    FileName = update.DownloadUrl,
+                                    UseShellExecute = true
+                                });
+                            }
+                        };
+                    }
+                }
+            }
+            catch
+            {
+                // Игнорируем ошибки автообновления
+            }
         }
 
         private void SetupSystemTray()

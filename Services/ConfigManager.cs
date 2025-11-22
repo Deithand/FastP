@@ -11,6 +11,7 @@ namespace FastP.Services
         public long MinFileSize { get; set; } = 0; // in bytes
         public bool EnableNotifications { get; set; } = true;
         public bool EnableAutostart { get; set; } = false;
+        public bool OrganizeByDate { get; set; } = false; // New feature v1.1
     }
 
     public class ConfigManager
